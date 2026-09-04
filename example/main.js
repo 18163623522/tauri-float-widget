@@ -195,6 +195,7 @@ const ddWindow = makeDropdown(document.getElementById("dd-window"), {
   onSelect: async (v) => {
     if (v === "__none") return;
     try {
+      let itemId; // 当前激活的采集源（用于重置缩放）
       if (v.startsWith("__mon:")) {
         // 切到指定显示器：overlay 局部更新 monitor_id，不动其他设置
         await request("SetInputSettings", { inputName: monitorName, inputSettings: { monitor_id: v.slice(6) }, overlay: true });
@@ -202,18 +203,39 @@ const ddWindow = makeDropdown(document.getElementById("dd-window"), {
         if (windowItemId !== null) {
           await request("SetSceneItemEnabled", { sceneName, sceneItemId: windowItemId, sceneItemEnabled: false });
         }
-        flash("已切换显示器");
+        itemId = monitorItemId;
       } else {
         await request("SetInputSettings", { inputName: WINCAP_NAME, inputSettings: { window: v }, overlay: true });
         await request("SetSceneItemEnabled", { sceneName, sceneItemId: windowItemId, sceneItemEnabled: true });
         if (monitorItemId !== null) {
           await request("SetSceneItemEnabled", { sceneName, sceneItemId: monitorItemId, sceneItemEnabled: false });
         }
-        flash("已切换窗口");
+        itemId = windowItemId;
+      }
+      // 画布/输出分辨率同步为目标分辨率（防拉伸错配：4K 画布配 1440p 屏会录成假 4K）
+      const dim = targetDims[v] || targetDims["__mon:" + String(v).slice(6)];
+      if (dim && dim.width > 0 && dim.height > 0) {
+        await request("SetVideoSettings", {
+          baseWidth: dim.width, baseHeight: dim.height,
+          outputWidth: dim.width, outputHeight: dim.height,
+        });
+        // 源缩放重置为 1:1，正好铺满新画布
+        if (itemId != null) {
+          await request("SetSceneItemTransform", {
+            sceneName, sceneItemId: itemId,
+            sceneItemTransform: { positionX: 0, positionY: 0, scaleX: 1, scaleY: 1 },
+          });
+        }
+        flash(`已切换 · ${dim.width}×${dim.height}`);
+      } else {
+        flash("已切换");
       }
     } catch (e) { flash(e?.message || "切换失败"); }
   },
 });
+
+// value → 目标分辨率（显示器与窗口共用）
+const targetDims = {};
 
 const ddFormat = makeDropdown(document.getElementById("dd-format"), {
   placeholder: "格式",
@@ -632,6 +654,7 @@ async function loadWindows() {
     const items = [{ group: "显示器" }];
     for (const d of displays) {
       items.push({ value: "__mon:" + d.monitor_id, label: d.label, title: d.label });
+      targetDims["__mon:" + d.monitor_id] = { width: d.width, height: d.height };
     }
     items.push({ group: "应用窗口" });
     for (const w of entries) {
@@ -639,6 +662,7 @@ async function loadWindows() {
         value: w.obs_window, label: w.label, hwnd: w.hwnd,
         onHover: windowItemHover(w), onLeave: windowItemLeave(),
       });
+      targetDims[w.obs_window] = { width: w.width, height: w.height };
     }
     ddWindow.setItems(items);
     suppressSave = true;

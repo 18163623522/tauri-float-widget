@@ -141,6 +141,8 @@ mod win_enum {
         pub label: String,      // 下拉显示："标题 — exe"
         pub obs_window: String, // OBS 格式："title:class:exe"（已转义）
         pub hwnd: isize,        // 原生窗口句柄（供悬停高亮）
+        pub width: u32,         // 客户区尺寸（切换时同步画布，防黑边/裁切）
+        pub height: u32,
     }
 
     static COLLECTED: Mutex<Vec<WinEntry>> = Mutex::new(Vec::new());
@@ -197,10 +199,15 @@ mod win_enum {
                         let n = GetClassNameW(hwnd, &mut class_buf);
                         let class = to_string(&class_buf[..n as usize]);
                         let exe = exe_name(pid);
+                        // 客户区尺寸 = 窗口采集源分辨率
+                        let mut cr = windows::Win32::Foundation::RECT::default();
+                        let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut cr);
                         COLLECTED.lock().unwrap().push(WinEntry {
                             label: format!("{} — {}", title, exe),
                             obs_window: format!("{}:{}:{}", obs_escape(&title), obs_escape(&class), exe),
                             hwnd: hwnd.0 as isize,
+                            width: (cr.right - cr.left).max(0) as u32,
+                            height: (cr.bottom - cr.top).max(0) as u32,
                         });
                     }
                 }
@@ -248,6 +255,8 @@ mod disp_enum {
     #[derive(Serialize)]
     pub struct DispEntry {
         pub monitor_id: String, // OBS monitor_capture 的 monitor_id
+        pub width: u32,         // 当前分辨率（切换时同步画布，防拉伸错配）
+        pub height: u32,
         pub label: String,      // "DELL U2725QE · 2560×1440"
     }
 
@@ -312,13 +321,15 @@ mod disp_enum {
                     dmSize: std::mem::size_of::<DEVMODEW>() as u16,
                     ..Default::default()
                 };
-                let res = if EnumDisplaySettingsW(PCWSTR(cw.as_ptr()), ENUM_CURRENT_SETTINGS, &mut dm).as_bool() {
-                    format!("{}×{}", dm.dmPelsWidth, dm.dmPelsHeight)
+                let (res, w, h) = if EnumDisplaySettingsW(PCWSTR(cw.as_ptr()), ENUM_CURRENT_SETTINGS, &mut dm).as_bool() {
+                    (format!("{}×{}", dm.dmPelsWidth, dm.dmPelsHeight), dm.dmPelsWidth, dm.dmPelsHeight)
                 } else {
-                    String::new()
+                    (String::new(), 0, 0)
                 };
                 out.push(DispEntry {
                     monitor_id,
+                    width: w,
+                    height: h,
                     label: if res.is_empty() { friendly } else { format!("{} · {}", friendly, res) },
                 });
             }
