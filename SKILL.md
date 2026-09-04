@@ -50,10 +50,20 @@ description: 用 Tauri 做桌面常驻悬浮工具条（置顶毛玻璃控制条
 - 入场动画 `dd-in 0.16s`（fade + 上移）
 
 ### 窗口选择交互（"哪个窗口是哪个"的辨识问题）
-悬停下拉项 250ms 去抖后，用 GDI 在目标窗口四周画 4px 红框约 3 秒（画在屏幕 DC，任何窗口上方可见）：
-- `CreatePen(PS_SOLID, 4, COLORREF)` + `Rectangle(GetDC(None), windowRect)`，每 300ms 重画防被覆盖，结束 `InvalidateRect` 擦除
-- 连续 hover 多窗口用 `AtomicU32 generation` 原子令牌：新调用使旧高亮线程自行退出
-- windows 0.58 坑：`InvalidateRect` 在 `Win32_Graphics_Gdi` 不在 WindowsAndMessaging；`SelectObject` 要 `HGDIOBJ::from(pen)` 显式转换（`.into()` 报 E0283）
+悬停下拉项 250ms 去抖后，目标窗口四周亮 4px 红框约 3 秒。**必须用分层覆盖窗**：
+- `WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_TOOLWINDOW|WS_EX_TOPMOST|WS_EX_NOACTIVATE` + `WS_POPUP` 的空心小窗（`SetWindowRgn` 外矩形挖内矩形只剩边框，类背景刷红色），盖在 `GetWindowRect` 位置上
+- 3 秒后自毁：`SetTimer` → 窗口过程 `WM_TIMER→DestroyWindow`、`WM_DESTROY→PostQuitMessage`，线程跑 `GetMessageW` 循环
+- 优点：零闪烁（**不要**用 GDI 画屏幕 DC + `InvalidateRect` 擦除——强制目标区域重绘会曝白闪烁）、鼠标穿透、永远顶层
+- 连续 hover 多窗口用 `AtomicU32 generation` + 全局 `OVERLAY: Mutex<Option<isize>>` 存旧覆盖窗 hwnd，新调用 `PostMessageW(WM_CLOSE)` 销毁旧的
+- windows 0.58 坑：`WPARAM` 在 `Win32::Foundation`；`GetMessageW/PostMessageW/SetTimer/CombineRgn` 参数用裸类型不带 `Option` 包装（包了报 Param trait 错误）；`InvalidateRect` 在 `Win32_Graphics_Gdi`；`SelectObject` 要 `HGDIOBJ::from(pen)` 显式转换（`.into()` 报 E0283）
+
+### 下拉浮层方向
+**向下弹**（`top: calc(100% + 6px)`）符合直觉，但外壳 `overflow:hidden` 会裁剪——打开时 JS 动态限高：
+```js
+const avail = window.innerHeight - btn.getBoundingClientRect().bottom - 10;
+list.style.maxHeight = Math.max(80, Math.min(216, avail)) + "px";
+```
+（空间不足的字段会自动滚动，而非被裁）
 
 ### 面板展开动画（真展开，不是瞬现）
 窗口原生 resize 无法动画，用两层配合伪造：**先 setSize 再让面板 CSS 过渡**——
