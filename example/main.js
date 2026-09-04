@@ -122,6 +122,12 @@ function makeDropdown(root, { placeholder = "请选择", onSelect }) {
     e.stopPropagation();
     document.querySelectorAll(".dd.open").forEach((d) => { if (d !== root) d.classList.remove("open"); });
     open = !open;
+    if (open) {
+      // 向下弹出：按窗口剩余空间动态限高，避免被外壳裁剪
+      const r = btn.getBoundingClientRect();
+      const avail = window.innerHeight - r.bottom - 10;
+      list.style.maxHeight = Math.max(80, Math.min(216, avail)) + "px";
+    }
     root.classList.toggle("open", open);
   });
   return {

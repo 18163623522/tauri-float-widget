@@ -203,7 +203,7 @@
       .dd-list {
         position: absolute;
         left: 0; right: 0;
-        bottom: calc(100% + 6px);
+        top: calc(100% + 6px);
         max-height: 216px;
         overflow-y: auto;
         background: rgba(32, 32, 36, 0.97);
@@ -217,7 +217,7 @@
       }
       .dd.open .dd-list { display: block; animation: dd-in 0.16s ease-out; }
       @keyframes dd-in {
-        from { opacity: 0; transform: translateY(6px); }
+        from { opacity: 0; transform: translateY(-4px); }
         to { opacity: 1; transform: translateY(0); }
       }
       .dd-list::-webkit-scrollbar { width: 6px; }

@@ -227,43 +227,90 @@ fn list_windows() -> Vec<win_enum::WinEntry> {
     win_enum::run()
 }
 
-// ---- 悬停高亮：在目标窗口四周画红框约 3 秒（画在屏幕 DC，任何窗口之上都可见） ----
+// ---- 悬停高亮：置顶分层覆盖窗画 4px 红框约 3 秒 ----
+// 用 WS_EX_LAYERED|WS_EX_TRANSPARENT 的空心边框小窗盖在目标窗口上：
+// 不触发目标窗口重绘（零闪烁）、鼠标点击穿透、永远在最上层
 #[cfg(windows)]
 mod flash {
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::time::Duration;
-    use windows::Win32::Foundation::{COLORREF, HWND, RECT};
+    use std::sync::Mutex;
+    use windows::core::w;
+    use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
     use windows::Win32::Graphics::Gdi::{
-        CreatePen, DeleteObject, GetDC, InvalidateRect, Rectangle, ReleaseDC, SelectObject,
-        PS_SOLID,
+        CombineRgn, CreateRectRgn, CreateSolidBrush, HRGN, RGN_DIFF, SetWindowRgn,
     };
-    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
+        GetWindowRect, PostMessageW, PostQuitMessage, RegisterClassExW, SetTimer, WM_CLOSE,
+        WM_DESTROY, WM_TIMER, WNDCLASSEXW, WINDOW_EX_STYLE, WINDOW_STYLE, WS_EX_LAYERED,
+        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+        WS_VISIBLE, MSG,
+    };
 
     static GEN: AtomicU32 = AtomicU32::new(0);
+    static OVERLAY: Mutex<Option<isize>> = Mutex::new(None);
+
+    unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        unsafe {
+            match msg {
+                WM_TIMER => { let _ = DestroyWindow(hwnd); LRESULT(0) }
+                WM_DESTROY => { PostQuitMessage(0); LRESULT(0) }
+                _ => DefWindowProcW(hwnd, msg, wp, lp),
+            }
+        }
+    }
 
     pub fn flash_border(hwnd_val: isize) {
         let gen = GEN.fetch_add(1, Ordering::SeqCst) + 1;
+        // 让旧覆盖窗自行销毁（旧线程的消息循环随之退出）
+        if let Some(old) = OVERLAY.lock().unwrap().take() {
+            unsafe { let _ = PostMessageW(HWND(old as *mut _), WM_CLOSE, WPARAM(0), LPARAM(0)); } }
         std::thread::spawn(move || unsafe {
-            let hwnd = HWND(hwnd_val as *mut _);
-            for _ in 0..10 {
-                if GEN.load(Ordering::SeqCst) != gen { return; } // 已切到别的窗口
-                let mut r = RECT::default();
-                if GetWindowRect(hwnd, &mut r).is_err() { return; }
-                let dc = GetDC(None);
-                // 4px 亮红框（COLORREF = 0x00BBGGRR）
-                let pen = CreatePen(PS_SOLID, 4, COLORREF(0x00_3C_46_FF));
-                let old = SelectObject(dc, windows::Win32::Graphics::Gdi::HGDIOBJ::from(pen));
-                let _ = Rectangle(dc, r.left, r.top, r.right, r.bottom);
-                SelectObject(dc, old);
-                let _ = DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ::from(pen));
-                ReleaseDC(None, dc);
-                std::thread::sleep(Duration::from_millis(300));
-            }
-            // 结束后擦掉边框（强制目标区域重绘）
+            let target = HWND(hwnd_val as *mut _);
             let mut r = RECT::default();
-            if GetWindowRect(hwnd, &mut r).is_ok() {
-                let _ = InvalidateRect(None, Some(&r), true);
+            if GetWindowRect(target, &mut r).is_err() { return; }
+            let w = r.right - r.left;
+            let h = r.bottom - r.top;
+            if w <= 10 || h <= 10 { return; }
+
+            let class_name = w!("obs_float_flash");
+            let wc = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(proc),
+                hbrBackground: CreateSolidBrush(COLORREF(0x00_3C_46_FF)), // 亮红
+                lpszClassName: class_name,
+                ..Default::default()
+            };
+            let _ = RegisterClassExW(&wc); // 类已注册则复用，忽略错误
+
+            let hwnd = CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                class_name,
+                w!(""),
+                WS_POPUP | WS_VISIBLE,
+                r.left, r.top, w, h,
+                None, None, None, None,
+            );
+            let Ok(hwnd) = hwnd else { return };
+            *OVERLAY.lock().unwrap() = Some(hwnd.0 as isize);
+
+            // 窗口形状 = 外矩形挖掉内矩形，只剩 4px 边框
+            let outer = CreateRectRgn(0, 0, w, h);
+            let inner = CreateRectRgn(4, 4, w - 4, h - 4);
+            let mut frame = HRGN::default();
+            CombineRgn(frame, outer, inner, RGN_DIFF);
+            let _ = SetWindowRgn(hwnd, frame, true);
+
+            let _ = SetTimer(hwnd, 1, 3000, None);
+            let mut msg = MSG::default();
+            loop {
+                let ret = GetMessageW(&mut msg, hwnd, 0, 0);
+                if !ret.as_bool() { break; } // WM_QUIT（窗口已销毁）
+                let _ = DispatchMessageW(&msg);
+                if GEN.load(Ordering::SeqCst) != gen { break; } // 已切到别的窗口
             }
+            let mut cur = OVERLAY.lock().unwrap();
+            if cur.map_or(false, |v| v == hwnd.0 as isize) { *cur = None; }
         });
     }
 }
