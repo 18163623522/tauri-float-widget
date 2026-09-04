@@ -123,10 +123,18 @@ function makeDropdown(root, { placeholder = "请选择", onSelect }) {
     document.querySelectorAll(".dd.open").forEach((d) => { if (d !== root) d.classList.remove("open"); });
     open = !open;
     if (open) {
-      // 向下弹出：按窗口剩余空间动态限高，避免被外壳裁剪
+      // 智能弹出方向：下方空间够就向下弹，不够就向上弹；高度自适应不超外壳
       const r = btn.getBoundingClientRect();
-      const avail = window.innerHeight - r.bottom - 10;
-      list.style.maxHeight = Math.max(80, Math.min(216, avail)) + "px";
+      const below = window.innerHeight - r.bottom - 10;
+      if (below >= 120) {
+        list.style.top = "calc(100% + 6px)";
+        list.style.bottom = "auto";
+        list.style.maxHeight = Math.min(216, below) + "px";
+      } else {
+        list.style.top = "auto";
+        list.style.bottom = "calc(100% + 6px)";
+        list.style.maxHeight = Math.max(100, Math.min(216, r.top - 40)) + "px";
+      }
     }
     root.classList.toggle("open", open);
   });

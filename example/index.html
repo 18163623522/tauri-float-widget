@@ -206,14 +206,14 @@
         top: calc(100% + 6px);
         max-height: 216px;
         overflow-y: auto;
-        background: rgba(32, 32, 36, 0.97);
-        backdrop-filter: blur(20px);
-        border: 1px solid rgba(255, 255, 255, 0.1);
+        /* 不用 backdrop-filter：嵌套在外壳毛玻璃内会引发合成层错乱（层级异常） */
+        background: rgba(34, 34, 38, 0.99);
+        border: 1px solid rgba(255, 255, 255, 0.12);
         border-radius: 10px;
         padding: 4px;
-        box-shadow: 0 10px 32px rgba(0, 0, 0, 0.5);
+        box-shadow: 0 10px 32px rgba(0, 0, 0, 0.55);
         display: none;
-        z-index: 60;
+        z-index: 100;
       }
       .dd.open .dd-list { display: block; animation: dd-in 0.16s ease-out; }
       @keyframes dd-in {
