@@ -201,21 +201,19 @@
       }
       .dd.open .dd-caret { transform: rotate(180deg); }
       .dd-list {
-        position: absolute;
-        left: 0; right: 0;
-        top: calc(100% + 6px);
+        /* fixed + 挂在 body 级：彻底摆脱面板/外壳的 overflow:hidden 裁剪（层级问题真根因） */
+        position: fixed;
         max-height: 216px;
         overflow-y: auto;
-        /* 不用 backdrop-filter：嵌套在外壳毛玻璃内会引发合成层错乱（层级异常） */
         background: rgba(34, 34, 38, 0.99);
         border: 1px solid rgba(255, 255, 255, 0.12);
         border-radius: 10px;
         padding: 4px;
         box-shadow: 0 10px 32px rgba(0, 0, 0, 0.55);
         display: none;
-        z-index: 100;
+        z-index: 999;
       }
-      .dd.open .dd-list { display: block; animation: dd-in 0.16s ease-out; }
+      .dd-list.anim-in { animation: dd-in 0.16s ease-out; }
       @keyframes dd-in {
         from { opacity: 0; transform: translateY(-4px); }
         to { opacity: 1; transform: translateY(0); }

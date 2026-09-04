@@ -76,7 +76,8 @@ function makeDropdown(root, { placeholder = "请选择", onSelect }) {
   btn.innerHTML = `<span class="dd-val"></span><svg class="dd-caret" viewBox="0 0 12 12"><path d="M2.5 4.5L6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
   const list = document.createElement("div");
   list.className = "dd-list";
-  root.append(btn, list);
+  root.append(btn);
+  document.body.appendChild(list); // 挂 body 级：面板/外壳的 overflow:hidden 会裁剪内部浮层
   let items = [];
   let value = null;
   let open = false;
@@ -123,29 +124,37 @@ function makeDropdown(root, { placeholder = "请选择", onSelect }) {
   function close() {
     open = false;
     root.classList.remove("open");
+    list.style.display = "none";
     if (winHoverTimer) { clearTimeout(winHoverTimer); winHoverTimer = null; }
   }
   btn.addEventListener("click", (e) => {
     e.stopPropagation();
-    document.querySelectorAll(".dd.open").forEach((d) => { if (d !== root) d.classList.remove("open"); });
+    closeAllDropdowns(api);
     open = !open;
     if (open) {
-      // 智能弹出方向：下方空间够就向下弹，不够就向上弹；高度自适应不超外壳
+      // fixed 定位贴到按钮下方；下方空间不足则向上弹（bottom 贴按钮顶，无需预知列表高度）
       const r = btn.getBoundingClientRect();
       const below = window.innerHeight - r.bottom - 10;
+      const above = r.top - 40;
+      list.style.left = r.left + "px";
+      list.style.width = r.width + "px";
       if (below >= 120) {
-        list.style.top = "calc(100% + 6px)";
+        list.style.top = (r.bottom + 6) + "px";
         list.style.bottom = "auto";
         list.style.maxHeight = Math.min(216, below) + "px";
       } else {
         list.style.top = "auto";
-        list.style.bottom = "calc(100% + 6px)";
-        list.style.maxHeight = Math.max(100, Math.min(216, r.top - 40)) + "px";
+        list.style.bottom = (window.innerHeight - r.top + 6) + "px";
+        list.style.maxHeight = Math.max(100, Math.min(216, above)) + "px";
       }
+      list.style.display = "block";
+      list.classList.remove("anim-in");
+      void list.offsetWidth; // 重启入场动画
+      list.classList.add("anim-in");
     }
     root.classList.toggle("open", open);
   });
-  return {
+  const api = {
     setValue,
     setItems,
     get value() { return value; },
@@ -153,12 +162,19 @@ function makeDropdown(root, { placeholder = "请选择", onSelect }) {
     close,
     setDisabled(d) { btn.classList.toggle("disabled", d); },
   };
+  allDropdowns.push(api);
+  return api;
 }
 
-// 全局点击/Escape 关闭所有下拉
-document.addEventListener("click", () => document.querySelectorAll(".dd.open").forEach((d) => d.classList.remove("open")));
+// 全局下拉注册表：统一关闭（浮层在 body 级，必须显式隐藏）
+const allDropdowns = [];
+function closeAllDropdowns(except) {
+  allDropdowns.forEach((d) => { if (d !== except) d.close(); });
+}
+window.addEventListener("resize", () => closeAllDropdowns());
+document.addEventListener("click", () => closeAllDropdowns());
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") document.querySelectorAll(".dd.open").forEach((d) => d.classList.remove("open"));
+  if (e.key === "Escape") closeAllDropdowns();
 });
 
 // 窗口下拉：悬停项 250ms 后目标窗口亮红框
@@ -438,8 +454,7 @@ async function togglePanel(force) {
     loadWindows();
   } else {
     panel.classList.remove("show");
-    ddWindow.close();
-    document.querySelectorAll(".dd.open").forEach((d) => d.classList.remove("open"));
+    closeAllDropdowns();
     setTimeout(async () => {
       await win.setSize(new LogicalSize(430, BAR_H));
       if (savedY !== null) {
