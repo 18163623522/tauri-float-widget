@@ -1,0 +1,554 @@
+// OBS 悬浮控制条 —— 直连 OBS 31 内置的 obs-websocket 5.x（JSON 协议）
+const { invoke } = window.__TAURI__.core;
+const { getCurrentWindow, LogicalSize, PhysicalPosition } = window.__TAURI__.window;
+
+const dot = document.getElementById("dot");
+const label = document.getElementById("label");
+const btnRec = document.getElementById("btn-rec");
+const btnPause = document.getElementById("btn-pause");
+const btnGear = document.getElementById("btn-gear");
+const btnClose = document.getElementById("btn-close");
+const panel = document.getElementById("panel");
+const panelMsg = document.getElementById("panel-msg");
+const panelHint = document.getElementById("panel-hint");
+const dirText = document.getElementById("dir-text");
+const btnOpenDir = document.getElementById("btn-open-dir");
+const btnPickDir = document.getElementById("btn-pick-dir");
+const selFormat = document.getElementById("sel-format");
+const inVbitrate = document.getElementById("in-vbitrate");
+const inAbitrate = document.getElementById("in-abitrate");
+const toast = document.getElementById("toast");
+const toastText = document.getElementById("toast-text");
+const toastOpen = document.getElementById("toast-open");
+const selWindow = document.getElementById("sel-window");
+const btnWinRefresh = document.getElementById("btn-win-refresh");
+const selEncoder = document.getElementById("sel-encoder");
+const btnPlay = document.getElementById("btn-play");
+const stBitrate = document.getElementById("st-bitrate");
+const stFps = document.getElementById("st-fps");
+const stCpu = document.getElementById("st-cpu");
+const stMem = document.getElementById("st-mem");
+const stGpu = document.getElementById("st-gpu");
+
+const win = getCurrentWindow();
+const BAR_H = 86, PANEL_H = 478; // 逻辑像素：主界面(60条+26信息条) / 展开后整窗高度
+const WINCAP_NAME = "悬浮条·窗口采集"; // 场景中自动创建/复用的 window_capture 源名
+
+// ---- 场景/统计状态 ----
+let sceneName = "";
+let monitorItemId = null; // 显示器采集源 id（无则不可切窗口）
+let windowItemId = null; // 窗口采集源 id
+let statsTimer = null;
+let gpuTick = 0;
+let sizeSamples = []; // 录像文件大小采样（算滑动码率）
+let loadingWindows = false;
+let suppressSelEvents = false; // 程序回填下拉值时不触发保存
+
+const ICON = {
+  rec: `<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="#ff453a"/></svg>`,
+  stop: `<svg viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="2" fill="#fff"/></svg>`,
+  pause: `<svg viewBox="0 0 16 16" fill="currentColor"><rect x="4" y="3" width="3" height="10" rx="1"/><rect x="9" y="3" width="3" height="10" rx="1"/></svg>`,
+  resume: `<svg viewBox="0 0 16 16" fill="currentColor"><path d="M5 3.2v9.6l8.2-4.8z"/></svg>`,
+  play: `<svg viewBox="0 0 16 16" fill="currentColor"><path d="M5 3.2v9.6l8.2-4.8z"/></svg>`,
+  gear: `<svg class="gear-ic" viewBox="0 0 16 16" fill="none"><path d="M6.6 1.8h2.8l.4 1.7c.4.15.75.35 1.1.6l1.6-.7 1.4 2.4-1.3 1.2c.03.23.05.46.05.7s-.02.47-.05.7l1.3 1.2-1.4 2.4-1.6-.7c-.35.25-.7.45-1.1.6l-.4 1.7H6.6l-.4-1.7a4.9 4.9 0 0 1-1.1-.6l-1.6.7-1.4-2.4 1.3-1.2a5.3 5.3 0 0 1 0-1.4L2.1 5.8l1.4-2.4 1.6.7c.35-.25.72-.45 1.1-.6l.4-1.7Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><circle cx="8" cy="8" r="2.1" stroke="currentColor" stroke-width="1.2"/></svg>`,
+};
+
+let cfg = null;
+let ws = null;
+let reqId = 0;
+const pending = new Map();
+let connState = "connecting"; // connecting | offline | online
+let recState = "idle"; // idle | recording | paused
+let recStartMs = 0; // Date.now() 对应录像时间码 0 点的时刻
+let lastOutputPath = ""; // 最近一次录像路径（来自事件，StopRecord 响应可能不带）
+let toastTimer = null;
+
+// ---- 面板状态 ----
+let panelOpen = false;
+let savedY = null; // 面板展开时若发生上移，记原 y 供收起还原
+let curDir = "";
+let suppressFormatEvent = false; // 程序回填格式值时不触发保存
+
+btnGear.innerHTML = ICON.gear;
+btnPlay.innerHTML = ICON.play;
+
+async function sha256b64(str) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+  let bin = "";
+  new Uint8Array(buf).forEach((b) => (bin += String.fromCharCode(b)));
+  return btoa(bin);
+}
+
+function parseTimecode(tc) {
+  const m = /^(\d+):(\d+):(\d+)/.exec(String(tc || ""));
+  if (!m) return 0;
+  return ((+m[1] * 60 + +m[2]) * 60 + +m[3]) * 1000;
+}
+
+function fmt(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = String(Math.floor(s / 3600)).padStart(2, "0");
+  const m = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
+  const ss = String(s % 60).padStart(2, "0");
+  return `${h}:${m}:${ss}`;
+}
+
+function render() {
+  dot.className = "";
+  if (connState === "offline") { dot.classList.add("off"); label.textContent = "未连接 OBS"; }
+  else if (connState === "connecting") { dot.classList.add("warn"); label.textContent = "连接 OBS…"; }
+  else if (recState === "idle") { dot.classList.add("ok"); label.textContent = "待机"; }
+  else if (recState === "recording") { dot.classList.add("rec"); label.textContent = `REC · ${fmt(Date.now() - recStartMs)}`; }
+  else if (recState === "paused") { dot.classList.add("paused"); label.textContent = `已暂停 · ${fmt(Date.now() - recStartMs)}`; }
+
+  btnRec.innerHTML = recState === "recording" || recState === "paused" ? ICON.stop : ICON.rec;
+  btnPause.innerHTML = recState === "paused" ? ICON.resume : ICON.pause;
+  btnPause.disabled = !(recState === "recording" || recState === "paused");
+}
+
+setInterval(() => {
+  if (connState === "online" && recState === "recording") render();
+}, 250);
+
+// ---- obs-websocket 连接 ----
+
+function connect() {
+  if (!cfg || !cfg.enabled) { connState = "offline"; render(); return setTimeout(connect, 4000); }
+  if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
+  connState = "connecting";
+  render();
+  try {
+    ws = new WebSocket(`ws://127.0.0.1:${cfg.port}`);
+  } catch {
+    return setTimeout(connect, 4000);
+  }
+  ws.onmessage = (ev) => onMessage(ev).catch(() => {});
+  ws.onclose = () => { connState = "offline"; recState = "idle"; render(); setTimeout(connect, 4000); };
+  ws.onerror = () => { try { ws.close(); } catch {} };
+}
+
+async function onMessage(ev) {
+  const m = JSON.parse(ev.data);
+  if (m.op === 0) {
+    // Hello：认证串 = base64(sha256(base64(sha256(pw+salt)) + challenge))
+    // 只订阅 General(1)+Outputs(64)，默认全订阅会有每秒 30+ 条音频电平洪流
+    const d = { rpcVersion: 1, eventSubscriptions: 65 };
+    if (m.d.authentication) {
+      const secret = await sha256b64(cfg.password + m.d.authentication.salt);
+      d.authentication = await sha256b64(secret + m.d.authentication.challenge);
+    }
+    send(1, d);
+  } else if (m.op === 2) {
+    // Identified：同步一次当前录制状态（悬浮条晚于录制启动时也能对齐）
+    connState = "online";
+    render();
+    request("GetRecordStatus")
+      .then((r) => {
+        if (r.outputPaused) setRec("paused", r.outputTimecode);
+        else if (r.outputActive) setRec("recording", r.outputTimecode);
+        else setRec("idle");
+      })
+      .catch(() => {});
+  } else if (m.op === 7) {
+    const p = pending.get(m.d.requestId);
+    if (!p) return;
+    pending.delete(m.d.requestId);
+    if (m.d.requestStatus?.result) p.resolve(m.d.responseData || {});
+    else p.reject(new Error(m.d.requestStatus?.comment || `请求失败 (code ${m.d.requestStatus?.code})`));
+  } else if (m.op === 5) {
+    // Event（注意：OBS 31 的 obs-websocket 5.5.6 实测事件 op=5，而非协议文档常写的 4）
+    handleEvent(m.d);
+  }
+}
+
+function send(op, d) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ op, d }));
+}
+
+function request(requestType, requestData) {
+  return new Promise((resolve, reject) => {
+    const id = `r${++reqId}`;
+    pending.set(id, { resolve, reject });
+    send(6, { requestType, requestId: id, ...(requestData ? { requestData } : {}) });
+    setTimeout(() => {
+      if (pending.has(id)) {
+        pending.delete(id);
+        reject(new Error(`${requestType} 超时`));
+      }
+    }, 8000);
+  });
+}
+
+function setRec(state, timecode) {
+  recState = state;
+  if (state === "recording") recStartMs = Date.now() - parseTimecode(timecode);
+  render();
+}
+
+function handleEvent(d) {
+  if (d.eventType !== "RecordStateChanged") return;
+  const e = d.eventData || {};
+  const s = String(e.outputState || "");
+  if (e.outputPath) lastOutputPath = e.outputPath; // STARTED/STOPPED 事件带完整录像路径
+  if (s.endsWith("PAUSED")) setRec("paused", e.outputTimecode);
+  else if (s.endsWith("RESUMED")) setRec("recording", e.outputTimecode);
+  else if (s.endsWith("STARTED")) setRec("recording", e.outputTimecode);
+  else if (s.endsWith("STOPPING") || s.endsWith("STOPPED")) setRec("idle");
+}
+
+function showToast(savedPath) {
+  const name = String(savedPath || "").split(/[\\/]/).pop() || "录像";
+  toastText.textContent = `已保存：${name}`;
+  toastText.title = savedPath || "";
+  toastOpen.onclick = () => invoke("reveal_saved", { path: savedPath }).catch(() => {});
+  toastOpen.style.display = "";
+  toast.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.remove("show"), 8000);
+}
+
+function showToastError(e) {
+  toastText.textContent = e?.message || String(e);
+  toastOpen.style.display = "none";
+  toast.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    toast.classList.remove("show");
+    toastOpen.style.display = "";
+  }, 4000);
+}
+
+// ---- 录制控制 ----
+
+btnRec.addEventListener("click", () => {
+  const stop = recState === "recording" || recState === "paused";
+  (stop ? request("StopRecord") : request("StartRecord"))
+    .then((r) => { if (stop && (r.outputPath || lastOutputPath)) showToast(r.outputPath || lastOutputPath); })
+    .catch(showToastError);
+});
+
+btnPause.addEventListener("click", () => {
+  request("ToggleRecordPause").catch(showToastError);
+});
+
+// 播放最近一次录像（本会话事件记录优先，其次扫录像目录最新文件）
+btnPlay.addEventListener("click", async () => {
+  try {
+    let target = lastOutputPath;
+    if (!target && curDir) target = await invoke("latest_video", { dir: curDir });
+    if (!target) {
+      // 面板没开过还没拉目录：现拉一次
+      const r = await request("GetRecordDirectory");
+      curDir = r.recordDirectory || "";
+      if (curDir) target = await invoke("latest_video", { dir: curDir });
+    }
+    if (!target) return showToastError(new Error("还没有录像文件"));
+    await invoke("open_folder", { path: target }); // open_path 对文件 = 系统默认播放器
+  } catch (e) {
+    showToastError(e);
+  }
+});
+
+btnClose.addEventListener("click", () => win.close());
+
+// ---- 设置面板 ----
+
+function flash(msg) {
+  panelMsg.textContent = msg;
+  setTimeout(() => { if (panelMsg.textContent === msg) panelMsg.textContent = ""; }, 2500);
+}
+
+async function togglePanel(force) {
+  panelOpen = force !== undefined ? force : !panelOpen;
+  if (panelOpen) {
+    panel.classList.add("show");
+    await win.setSize(new LogicalSize(430, PANEL_H));
+    // 贴近屏幕底部时上移窗口，避免面板出屏
+    try {
+      const scale = await win.scaleFactor();
+      const pos = await win.outerPosition();
+      const mon = await win.currentMonitor();
+      if (mon) {
+        const monBottom = mon.position.y + mon.size.height;
+        const needH = Math.round(PANEL_H * scale);
+        if (pos.y + needH > monBottom) {
+          savedY = pos.y;
+          await win.setPosition(new PhysicalPosition(pos.x, Math.max(mon.position.y, monBottom - needH)));
+        }
+      }
+    } catch {}
+    loadSettings();
+    loadWindows();
+  } else {
+    panel.classList.remove("show");
+    await win.setSize(new LogicalSize(430, BAR_H));
+    if (savedY !== null) {
+      try {
+        const pos = await win.outerPosition();
+        await win.setPosition(new PhysicalPosition(pos.x, savedY));
+      } catch {}
+      savedY = null;
+    }
+  }
+}
+
+btnGear.addEventListener("click", () => togglePanel());
+
+async function loadSettings() {
+  dirText.textContent = "读取中…";
+  dirText.title = "";
+  try {
+    const r = await request("GetRecordDirectory");
+    curDir = r.recordDirectory || "";
+    dirText.textContent = curDir || "(未设置)";
+    dirText.title = curDir;
+  } catch (e) {
+    dirText.textContent = "读取失败";
+  }
+  // 格式/码率仅支持 Simple 输出模式
+  let simple = true;
+  try {
+    const mode = await request("GetProfileParameter", { parameterCategory: "Output", parameterName: "Mode" });
+    simple = mode.parameterValue !== "Advanced";
+  } catch {}
+  selFormat.disabled = inVbitrate.disabled = inAbitrate.disabled = !simple;
+  panelHint.textContent = simple
+    ? "格式与码率在下次开始录制时生效"
+    : "当前 OBS 为高级输出模式：文件夹可直接更改，格式与码率请在 OBS 设置中修改";
+  panelHint.classList.toggle("err", !simple);
+  if (!simple) return;
+  try {
+    const fmt = await request("GetProfileParameter", { parameterCategory: "SimpleOutput", parameterName: "RecFormat2" });
+    const v = fmt.parameterValue || "mkv";
+    suppressFormatEvent = true;
+    if (![...selFormat.options].some((o) => o.value === v)) {
+      const opt = document.createElement("option");
+      opt.value = v; opt.textContent = v;
+      selFormat.appendChild(opt);
+    }
+    selFormat.value = v;
+    suppressFormatEvent = false;
+  } catch {}
+  try {
+    const enc = await request("GetProfileParameter", { parameterCategory: "SimpleOutput", parameterName: "RecEncoder" });
+    const v = enc.parameterValue || "nvenc";
+    if (![...selEncoder.options].some((o) => o.value === v)) {
+      const opt = document.createElement("option");
+      opt.value = v; opt.textContent = v;
+      selEncoder.appendChild(opt);
+    }
+    selEncoder.value = v;
+  } catch {}
+  try {
+    const vb = await request("GetProfileParameter", { parameterCategory: "SimpleOutput", parameterName: "VBitrate" });
+    if (vb.parameterValue) inVbitrate.value = vb.parameterValue;
+  } catch {}
+  try {
+    const ab = await request("GetProfileParameter", { parameterCategory: "SimpleOutput", parameterName: "ABitrate" });
+    if (ab.parameterValue) inAbitrate.value = ab.parameterValue;
+  } catch {}
+}
+
+btnOpenDir.addEventListener("click", () => {
+  if (curDir) invoke("open_folder", { path: curDir }).catch((e) => flash(e?.message || "打开失败"));
+});
+
+btnPickDir.addEventListener("click", async () => {
+  try {
+    const picked = await invoke("pick_folder");
+    if (!picked) return; // 用户取消
+    await request("SetRecordDirectory", { recordDirectory: picked });
+    curDir = picked;
+    dirText.textContent = curDir;
+    dirText.title = curDir;
+    flash("已更新");
+  } catch (e) {
+    flash(e?.message || "更改失败");
+  }
+});
+
+selFormat.addEventListener("change", async () => {
+  if (suppressFormatEvent) return;
+  try {
+    await request("SetProfileParameter", { parameterCategory: "SimpleOutput", parameterName: "RecFormat2", parameterValue: selFormat.value });
+    flash("已保存");
+  } catch (e) {
+    flash(e?.message || "保存失败");
+    loadSettings();
+  }
+});
+
+async function saveBitrate(input, name) {
+  const v = parseInt(input.value, 10);
+  if (!Number.isFinite(v) || v <= 0) return flash("请输入有效码率");
+  try {
+    await request("SetProfileParameter", { parameterCategory: "SimpleOutput", parameterName: name, parameterValue: String(v) });
+    flash("已保存");
+  } catch (e) {
+    flash(e?.message || "保存失败");
+  }
+}
+
+inVbitrate.addEventListener("change", () => saveBitrate(inVbitrate, "VBitrate"));
+inAbitrate.addEventListener("change", () => saveBitrate(inAbitrate, "ABitrate"));
+
+selEncoder.addEventListener("change", async () => {
+  if (suppressSelEvents) return;
+  try {
+    await request("SetProfileParameter", { parameterCategory: "SimpleOutput", parameterName: "RecEncoder", parameterValue: selEncoder.value });
+    flash("已保存");
+  } catch (e) {
+    flash(e?.message || "保存失败");
+  }
+});
+
+// ---- 录制窗口切换 ----
+
+async function loadSceneInfo() {
+  try {
+    const sl = await request("GetSceneList");
+    sceneName = sl.currentProgramSceneName || "";
+    const il = await request("GetSceneItemList", { sceneName });
+    const items = il.sceneItems || [];
+    const mon = items.find((i) => i.inputKind === "monitor_capture");
+    monitorItemId = mon ? mon.sceneItemId : null;
+    let wcap = items.find((i) => i.inputKind === "window_capture");
+    if (!wcap) {
+      // 场景里还没有窗口采集源：创建一个隐藏的，切换时才显示
+      const created = await request("CreateInput", {
+        sceneName, inputName: WINCAP_NAME, inputKind: "window_capture",
+        inputSettings: {}, sceneItemEnabled: false,
+      });
+      wcap = { sceneItemId: created.sceneItemId, sceneItemEnabled: false };
+    }
+    windowItemId = wcap.sceneItemId;
+    // 回填下拉当前选择
+    suppressSelEvents = true;
+    if (mon?.sceneItemEnabled || !wcap.sceneItemEnabled) {
+      selWindow.value = "__display";
+    } else {
+      const s = await request("GetInputSettings", { inputName: WINCAP_NAME });
+      const cur = s.inputSettings?.window || "";
+      const hit = [...selWindow.options].find((o) => o.value === cur);
+      selWindow.value = hit ? cur : "__display";
+    }
+    suppressSelEvents = false;
+  } catch (e) {
+    suppressSelEvents = false;
+  }
+}
+
+async function loadWindows() {
+  if (loadingWindows) return;
+  loadingWindows = true;
+  btnWinRefresh.textContent = "刷新中…";
+  try {
+    await loadSceneInfo();
+    const keep = selWindow.value; // 保持当前选择
+    const entries = await invoke("list_windows");
+    [...selWindow.options].filter((o) => o.value !== "__display").forEach((o) => o.remove());
+    for (const w of entries) {
+      const opt = document.createElement("option");
+      opt.value = w.obs_window;
+      opt.textContent = w.label;
+      opt.title = w.label;
+      selWindow.appendChild(opt);
+    }
+    suppressSelEvents = true;
+    selWindow.value = [...selWindow.options].some((o) => o.value === keep) ? keep : "__display";
+    suppressSelEvents = false;
+  } catch {}
+  btnWinRefresh.textContent = "刷新列表";
+  loadingWindows = false;
+}
+
+btnWinRefresh.addEventListener("click", loadWindows);
+
+selWindow.addEventListener("change", async () => {
+  if (suppressSelEvents) return;
+  const v = selWindow.value;
+  try {
+    if (v === "__display") {
+      if (windowItemId !== null) {
+        await request("SetSceneItemEnabled", { sceneName, sceneItemId: windowItemId, sceneItemEnabled: false });
+      }
+      if (monitorItemId !== null) {
+        await request("SetSceneItemEnabled", { sceneName, sceneItemId: monitorItemId, sceneItemEnabled: true });
+      }
+    } else {
+      await request("SetInputSettings", { inputName: WINCAP_NAME, inputSettings: { window: v, method: "auto" } });
+      await request("SetSceneItemEnabled", { sceneName, sceneItemId: windowItemId, sceneItemEnabled: true });
+      if (monitorItemId !== null) {
+        await request("SetSceneItemEnabled", { sceneName, sceneItemId: monitorItemId, sceneItemEnabled: false });
+      }
+    }
+    flash("已切换");
+  } catch (e) {
+    flash(e?.message || "切换失败");
+  }
+});
+
+// ---- 实时统计（常驻信息条，启动即轮询） ----
+
+function startStats() {
+  if (statsTimer) return;
+  statsTimer = setInterval(tickStats, 1000);
+  tickStats();
+}
+
+function stopStats() {
+  if (statsTimer) clearInterval(statsTimer);
+  statsTimer = null;
+  gpuTick = 0;
+  sizeSamples = [];
+  [stBitrate, stFps, stCpu, stMem, stGpu].forEach((el) => (el.textContent = "—"));
+}
+
+async function tickStats() {
+  if (connState !== "online") return;
+  // OBS 进程统计
+  try {
+    const s = await request("GetStats");
+    stCpu.textContent = s.cpuUsage.toFixed(1) + "%";
+    stMem.textContent = Math.round(s.memoryUsage) + " MB";
+    const drop = s.outputTotalFrames > 0 ? (s.outputSkippedFrames / s.outputTotalFrames) * 100 : 0;
+    stFps.textContent = drop >= 1
+      ? `${s.activeFps.toFixed(0)} ⚠${drop.toFixed(1)}%`
+      : s.activeFps.toFixed(0);
+  } catch {}
+  // GPU（整机 + NVENC 编码器），2 秒一次
+  if (++gpuTick % 2 === 0) {
+    try {
+      const g = await invoke("gpu_stats");
+      stGpu.textContent = g ? `${g.gpu}%/编${g.enc}` : "不可用";
+    } catch { stGpu.textContent = "不可用"; }
+  }
+  // 码率（按录像文件增速，3 个采样点滑动窗口）；时长已由主条 REC 计时显示
+  if (recState === "recording") {
+    if (lastOutputPath) {
+      try {
+        const size = await invoke("rec_file_size", { path: lastOutputPath });
+        if (size != null) {
+          sizeSamples.push({ t: Date.now(), size });
+          while (sizeSamples.length > 3) sizeSamples.shift();
+          if (sizeSamples.length >= 2) {
+            const a = sizeSamples[0], b = sizeSamples[sizeSamples.length - 1];
+            const kbps = Math.round(((b.size - a.size) * 8) / Math.max(1, b.t - a.t) / 1000);
+            stBitrate.textContent = kbps.toLocaleString() + " kbps";
+          }
+        }
+      } catch {}
+    }
+  } else {
+    stBitrate.textContent = "—";
+    sizeSamples = [];
+  }
+}
+
+// ---- 启动 ----
+
+render();
+startStats(); // 信息条常驻统计
+invoke("get_obs_config")
+  .then((c) => { cfg = c; connect(); })
+  .catch(() => { connState = "offline"; render(); });

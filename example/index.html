@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OBS Float Bar</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        background: transparent;
+        overflow: hidden;
+        user-select: none;
+        font-family: "MiSans", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+      }
+      /* ---- 一体化外壳：悬浮条 + 信息条 + 设置面板共用一个毛玻璃圆角容器 ---- */
+      #shell {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        background: rgba(22, 22, 24, 0.88);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 16px;
+        backdrop-filter: blur(24px);
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+        overflow: hidden;
+      }
+      /* ---- 主悬浮条 ---- */
+      #bar {
+        height: 60px;
+        flex: none;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 0 10px 0 16px;
+        cursor: default;
+      }
+      #dot {
+        width: 10px; height: 10px; border-radius: 50%;
+        background: #8e8e93; flex: none; transition: background 0.2s;
+      }
+      #dot.off  { background: #8e8e93; }
+      #dot.warn { background: #ffd60a; }
+      #dot.ok   { background: #30d158; }
+      #dot.rec  { background: #ff453a; animation: blink 1.2s ease-in-out infinite; }
+      #dot.paused { background: #ff9f0a; }
+      @keyframes blink { 50% { opacity: 0.25; } }
+      #label {
+        font-size: 13px; font-weight: 600; letter-spacing: 0.2px;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        color: rgba(255, 255, 255, 0.92);
+        font-variant-numeric: tabular-nums;
+      }
+      .spacer { flex: 1; }
+      .btn {
+        width: 36px; height: 36px; border-radius: 50%; border: none;
+        background: transparent; color: rgba(255, 255, 255, 0.85);
+        display: flex; align-items: center; justify-content: center;
+        cursor: pointer; flex: none; padding: 0;
+        transition: background 0.15s, transform 0.15s;
+      }
+      .btn:hover { background: rgba(255, 255, 255, 0.09); }
+      .btn:active { background: rgba(255, 255, 255, 0.14); transform: scale(0.92); }
+      .btn:disabled { opacity: 0.3; cursor: default; background: transparent; transform: none; }
+      .btn svg { width: 16px; height: 16px; display: block; }
+      .btn svg { transition: transform 0.3s ease; }
+      .btn:hover svg.gear-ic { transform: rotate(60deg); }
+      /* ---- 信息条（常驻统计） ---- */
+      #info-strip {
+        height: 26px;
+        flex: none;
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 0 16px;
+        background: rgba(0, 0, 0, 0.22);
+        font-size: 11px;
+        color: rgba(255, 255, 255, 0.55);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+        overflow: hidden;
+      }
+      #info-strip .iv { color: rgba(255, 255, 255, 0.82); font-weight: 600; }
+      #info-strip .sep { color: rgba(255, 255, 255, 0.18); flex: none; }
+      #info-strip .item { flex: none; }
+      /* ---- 设置面板（展开区，位于信息条下方） ---- */
+      #panel {
+        display: none;
+        flex-direction: column;
+        gap: 11px;
+        padding: 12px 16px 12px;
+        border-top: 1px solid rgba(255, 255, 255, 0.07);
+        background: rgba(0, 0, 0, 0.14);
+      }
+      #panel.show { display: flex; }
+      #panel .anim {
+        opacity: 0; transform: translateY(-6px);
+        animation: field-in 0.22s ease-out forwards;
+      }
+      @keyframes field-in { to { opacity: 1; transform: translateY(0); } }
+      .panel-head {
+        display: flex; align-items: center; justify-content: space-between;
+        font-size: 13px; font-weight: 700; color: rgba(255, 255, 255, 0.95);
+      }
+      .panel-head .sub { font-size: 11px; font-weight: 400; color: rgba(255,255,255,0.45); }
+      .label-row { display: flex; align-items: baseline; justify-content: space-between; }
+      .link-btn {
+        border: none; background: transparent; color: #0a84ff;
+        font-size: 11px; font-weight: 600; cursor: pointer; padding: 0;
+        font-family: inherit;
+      }
+      .link-btn:hover { text-decoration: underline; }
+      .field label {
+        display: block; font-size: 11px; color: rgba(255, 255, 255, 0.5);
+        margin-bottom: 5px; letter-spacing: 0.3px;
+      }
+      .dir-row { display: flex; align-items: center; gap: 6px; }
+      #dir-text {
+        flex: 1; min-width: 0; font-size: 12px; color: rgba(255, 255, 255, 0.88);
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        background: rgba(255, 255, 255, 0.06); border-radius: 8px;
+        padding: 7px 10px;
+      }
+      .mini-btn {
+        border: none; border-radius: 8px; padding: 7px 12px;
+        font-size: 12px; font-weight: 600; cursor: pointer;
+        background: rgba(255, 255, 255, 0.1); color: rgba(255, 255, 255, 0.9);
+        font-family: inherit; flex: none;
+        transition: background 0.15s;
+      }
+      .mini-btn:hover { background: rgba(255, 255, 255, 0.16); }
+      .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+      select, input[type="number"] {
+        width: 100%; border: none; border-radius: 8px;
+        background: rgba(255, 255, 255, 0.06); color: rgba(255, 255, 255, 0.88);
+        font-size: 12px; padding: 7px 10px; font-family: inherit; outline: none;
+        transition: background 0.15s;
+      }
+      select:focus, input[type="number"]:focus { background: rgba(255, 255, 255, 0.1); }
+      select:disabled, input[type="number"]:disabled { opacity: 0.35; }
+      select option { background: #26262a; color: #fff; }
+      .unit-row { display: flex; align-items: center; gap: 6px; }
+      .unit-row .unit { font-size: 11px; color: rgba(255, 255, 255, 0.45); flex: none; }
+      .hint { font-size: 11px; color: rgba(255, 255, 255, 0.38); line-height: 1.4; }
+      .hint.err { color: #ff9f0a; }
+      /* ---- toast ---- */
+      #toast {
+        position: fixed;
+        bottom: calc(100% + 8px);
+        right: 0;
+        background: rgba(40, 40, 44, 0.96);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 12px;
+        padding: 8px 12px;
+        font-size: 12px;
+        color: #fff;
+        display: none;
+        align-items: center;
+        gap: 12px;
+        white-space: nowrap;
+        box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+        animation: field-in 0.2s ease-out;
+      }
+      #toast.show { display: flex; }
+      #toast-text { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+      #toast-open {
+        border: none; background: transparent; color: #0a84ff;
+        font-size: 12px; font-weight: 600; cursor: pointer; padding: 0;
+        font-family: inherit;
+      }
+      #toast-open:hover { text-decoration: underline; }
+    </style>
+  </head>
+  <body>
+    <div id="shell">
+      <div id="bar" data-tauri-drag-region>
+        <div id="dot" class="off" data-tauri-drag-region></div>
+        <div id="label" data-tauri-drag-region>连接中…</div>
+        <div class="spacer" data-tauri-drag-region></div>
+        <button id="btn-pause" class="btn" disabled title="暂停 / 恢复"></button>
+        <button id="btn-rec" class="btn" title="开始 / 停止录制"></button>
+        <button id="btn-play" class="btn" title="播放最近一次录像"></button>
+        <button id="btn-gear" class="btn" title="录制设置"></button>
+        <button id="btn-close" class="btn" title="退出">
+          <svg viewBox="0 0 16 16" fill="none">
+            <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+      <div id="info-strip">
+        <span class="item">码率 <span class="iv" id="st-bitrate">—</span></span>
+        <span class="sep">·</span>
+        <span class="item">FPS <span class="iv" id="st-fps">—</span></span>
+        <span class="sep">·</span>
+        <span class="item">CPU <span class="iv" id="st-cpu">—</span></span>
+        <span class="sep">·</span>
+        <span class="item">GPU <span class="iv" id="st-gpu">—</span></span>
+        <span class="sep">·</span>
+        <span class="item">内存 <span class="iv" id="st-mem">—</span></span>
+      </div>
+      <div id="panel">
+        <div class="panel-head anim" style="animation-delay: 0ms">
+          <span>录制设置 <span class="sub">· 保存于 OBS 配置，长期有效</span></span>
+          <span id="panel-msg" class="sub"></span>
+        </div>
+        <div class="field anim" style="animation-delay: 25ms">
+          <div class="label-row">
+            <label>录制窗口</label>
+            <button id="btn-win-refresh" class="link-btn">刷新列表</button>
+          </div>
+          <select id="sel-window">
+            <option value="__display">整个显示器（当前画面）</option>
+          </select>
+        </div>
+        <div class="field anim" style="animation-delay: 50ms">
+          <label>录像文件夹</label>
+          <div class="dir-row">
+            <span id="dir-text" title="">读取中…</span>
+            <button id="btn-open-dir" class="mini-btn">打开</button>
+            <button id="btn-pick-dir" class="mini-btn">更改</button>
+          </div>
+        </div>
+        <div class="field anim" style="animation-delay: 75ms">
+          <label>录像格式</label>
+          <select id="sel-format">
+            <option value="mkv">MKV（损坏可恢复，推荐）</option>
+            <option value="mp4">MP4（兼容性最好）</option>
+            <option value="hybrid_mp4">混合 MP4（MP4 + 可恢复）</option>
+            <option value="fmp4">碎片化 MP4</option>
+            <option value="mov">MOV</option>
+          </select>
+        </div>
+        <div class="field anim" style="animation-delay: 100ms">
+          <label>视频编码器</label>
+          <select id="sel-encoder">
+            <option value="nvenc">NVIDIA NVENC（GPU 硬编，推荐）</option>
+            <option value="x264">软件 x264（CPU 编码）</option>
+            <option value="qsv">Intel 快速同步 (QSV)</option>
+            <option value="amd">AMD AMF</option>
+          </select>
+        </div>
+        <div class="grid2 anim" style="animation-delay: 125ms">
+          <div class="field">
+            <label>视频码率</label>
+            <div class="unit-row">
+              <input id="in-vbitrate" type="number" min="500" max="100000" step="500" />
+              <span class="unit">kbps</span>
+            </div>
+          </div>
+          <div class="field">
+            <label>音频码率</label>
+            <div class="unit-row">
+              <input id="in-abitrate" type="number" min="32" max="512" step="32" />
+              <span class="unit">kbps</span>
+            </div>
+          </div>
+        </div>
+        <div id="panel-hint" class="hint anim" style="animation-delay: 150ms">格式与码率在下次开始录制时生效</div>
+      </div>
+    </div>
+
+    <div id="toast">
+      <span id="toast-text"></span>
+      <button id="toast-open">打开文件夹</button>
+    </div>
+    <script src="main.js"></script>
+  </body>
+</html>
