@@ -14,15 +14,12 @@ const panelHint = document.getElementById("panel-hint");
 const dirText = document.getElementById("dir-text");
 const btnOpenDir = document.getElementById("btn-open-dir");
 const btnPickDir = document.getElementById("btn-pick-dir");
-const selFormat = document.getElementById("sel-format");
 const inVbitrate = document.getElementById("in-vbitrate");
 const inAbitrate = document.getElementById("in-abitrate");
 const toast = document.getElementById("toast");
 const toastText = document.getElementById("toast-text");
 const toastOpen = document.getElementById("toast-open");
-const selWindow = document.getElementById("sel-window");
 const btnWinRefresh = document.getElementById("btn-win-refresh");
-const selEncoder = document.getElementById("sel-encoder");
 const btnPlay = document.getElementById("btn-play");
 const stBitrate = document.getElementById("st-bitrate");
 const stFps = document.getElementById("st-fps");
@@ -33,16 +30,6 @@ const stGpu = document.getElementById("st-gpu");
 const win = getCurrentWindow();
 const BAR_H = 86, PANEL_H = 478; // 逻辑像素：主界面(60条+26信息条) / 展开后整窗高度
 const WINCAP_NAME = "悬浮条·窗口采集"; // 场景中自动创建/复用的 window_capture 源名
-
-// ---- 场景/统计状态 ----
-let sceneName = "";
-let monitorItemId = null; // 显示器采集源 id（无则不可切窗口）
-let windowItemId = null; // 窗口采集源 id
-let statsTimer = null;
-let gpuTick = 0;
-let sizeSamples = []; // 录像文件大小采样（算滑动码率）
-let loadingWindows = false;
-let suppressSelEvents = false; // 程序回填下拉值时不触发保存
 
 const ICON = {
   rec: `<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="#ff453a"/></svg>`,
@@ -63,14 +50,154 @@ let recStartMs = 0; // Date.now() 对应录像时间码 0 点的时刻
 let lastOutputPath = ""; // 最近一次录像路径（来自事件，StopRecord 响应可能不带）
 let toastTimer = null;
 
-// ---- 面板状态 ----
+// ---- 面板/场景/统计状态 ----
 let panelOpen = false;
 let savedY = null; // 面板展开时若发生上移，记原 y 供收起还原
 let curDir = "";
-let suppressFormatEvent = false; // 程序回填格式值时不触发保存
+let suppressSave = false; // 程序回填下拉值时不触发保存
+let sceneName = "";
+let monitorItemId = null; // 显示器采集源 id（无则不可切窗口）
+let windowItemId = null; // 窗口采集源 id
+let statsTimer = null;
+let gpuTick = 0;
+let sizeSamples = []; // 录像文件大小采样（算滑动码率）
+let loadingWindows = false;
+let winHoverTimer = null; // 窗口下拉项 hover 去抖
 
 btnGear.innerHTML = ICON.gear;
 btnPlay.innerHTML = ICON.play;
+
+// ---- 自定义下拉组件（毛玻璃浮层、向上弹出、可选 hover 回调） ----
+
+function makeDropdown(root, { placeholder = "请选择", onSelect }) {
+  const btn = document.createElement("button");
+  btn.className = "dd-btn";
+  btn.type = "button";
+  btn.innerHTML = `<span class="dd-val"></span><svg class="dd-caret" viewBox="0 0 12 12"><path d="M2.5 4.5L6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  const list = document.createElement("div");
+  list.className = "dd-list";
+  root.append(btn, list);
+  let items = [];
+  let value = null;
+  let open = false;
+
+  function renderList() {
+    list.innerHTML = "";
+    for (const it of items) {
+      const el = document.createElement("div");
+      el.className = "dd-item" + (it.value === value ? " cur" : "");
+      el.textContent = it.label;
+      el.title = it.label;
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        setValue(it.value, true);
+        close();
+      });
+      if (it.onHover) {
+        el.addEventListener("mouseenter", it.onHover);
+        el.addEventListener("mouseleave", it.onLeave || (() => {}));
+      }
+      list.appendChild(el);
+    }
+  }
+  function setValue(v, fire) {
+    value = v;
+    const it = items.find((i) => i.value === v);
+    btn.querySelector(".dd-val").textContent = it ? it.label : placeholder;
+    renderList();
+    if (fire && onSelect && !suppressSave) onSelect(v);
+  }
+  function setItems(newItems, keepValue = true) {
+    items = newItems;
+    if (!keepValue || !items.some((i) => i.value === value)) value = null;
+    renderList();
+    setValue(value, false);
+  }
+  function close() {
+    open = false;
+    root.classList.remove("open");
+    if (winHoverTimer) { clearTimeout(winHoverTimer); winHoverTimer = null; }
+  }
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    document.querySelectorAll(".dd.open").forEach((d) => { if (d !== root) d.classList.remove("open"); });
+    open = !open;
+    root.classList.toggle("open", open);
+  });
+  return {
+    setValue,
+    setItems,
+    get value() { return value; },
+    get open() { return open; },
+    close,
+    setDisabled(d) { btn.classList.toggle("disabled", d); },
+  };
+}
+
+// 全局点击/Escape 关闭所有下拉
+document.addEventListener("click", () => document.querySelectorAll(".dd.open").forEach((d) => d.classList.remove("open")));
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") document.querySelectorAll(".dd.open").forEach((d) => d.classList.remove("open"));
+});
+
+// 窗口下拉：悬停项 250ms 后目标窗口亮红框
+function windowItemHover(entry) {
+  return () => {
+    if (winHoverTimer) clearTimeout(winHoverTimer);
+    winHoverTimer = setTimeout(() => {
+      invoke("flash_window", { hwnd: entry.hwnd }).catch(() => {});
+    }, 250);
+  };
+}
+function windowItemLeave() {
+  return () => { if (winHoverTimer) { clearTimeout(winHoverTimer); winHoverTimer = null; } };
+}
+
+const ddWindow = makeDropdown(document.getElementById("dd-window"), {
+  placeholder: "加载中…",
+  onSelect: async (v) => {
+    if (v === "__display") {
+      try {
+        if (windowItemId !== null) {
+          await request("SetSceneItemEnabled", { sceneName, sceneItemId: windowItemId, sceneItemEnabled: false });
+        }
+        if (monitorItemId !== null) {
+          await request("SetSceneItemEnabled", { sceneName, sceneItemId: monitorItemId, sceneItemEnabled: true });
+        }
+        flash("已切换为整屏");
+      } catch (e) { flash(e?.message || "切换失败"); }
+    } else {
+      try {
+        await request("SetInputSettings", { inputName: WINCAP_NAME, inputSettings: { window: v, method: "auto" } });
+        await request("SetSceneItemEnabled", { sceneName, sceneItemId: windowItemId, sceneItemEnabled: true });
+        if (monitorItemId !== null) {
+          await request("SetSceneItemEnabled", { sceneName, sceneItemId: monitorItemId, sceneItemEnabled: false });
+        }
+        flash("已切换窗口");
+      } catch (e) { flash(e?.message || "切换失败"); }
+    }
+  },
+});
+
+const ddFormat = makeDropdown(document.getElementById("dd-format"), {
+  placeholder: "格式",
+  onSelect: async (v) => {
+    try {
+      await request("SetProfileParameter", { parameterCategory: "SimpleOutput", parameterName: "RecFormat2", parameterValue: v });
+      flash("已保存");
+    } catch (e) { flash(e?.message || "保存失败"); }
+  },
+});
+
+const ddEncoder = makeDropdown(document.getElementById("dd-encoder"), {
+  placeholder: "编码器",
+  onSelect: async (v) => {
+    try {
+      await request("SetProfileParameter", { parameterCategory: "SimpleOutput", parameterName: "RecEncoder", parameterValue: v });
+      flash("已保存");
+    } catch (e) { flash(e?.message || "保存失败"); }
+  },
+});
 
 async function sha256b64(str) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
@@ -237,7 +364,6 @@ btnPlay.addEventListener("click", async () => {
     let target = lastOutputPath;
     if (!target && curDir) target = await invoke("latest_video", { dir: curDir });
     if (!target) {
-      // 面板没开过还没拉目录：现拉一次
       const r = await request("GetRecordDirectory");
       curDir = r.recordDirectory || "";
       if (curDir) target = await invoke("latest_video", { dir: curDir });
@@ -261,8 +387,8 @@ function flash(msg) {
 async function togglePanel(force) {
   panelOpen = force !== undefined ? force : !panelOpen;
   if (panelOpen) {
-    panel.classList.add("show");
     await win.setSize(new LogicalSize(430, PANEL_H));
+    requestAnimationFrame(() => panel.classList.add("show"));
     // 贴近屏幕底部时上移窗口，避免面板出屏
     try {
       const scale = await win.scaleFactor();
@@ -281,14 +407,18 @@ async function togglePanel(force) {
     loadWindows();
   } else {
     panel.classList.remove("show");
-    await win.setSize(new LogicalSize(430, BAR_H));
-    if (savedY !== null) {
-      try {
-        const pos = await win.outerPosition();
-        await win.setPosition(new PhysicalPosition(pos.x, savedY));
-      } catch {}
-      savedY = null;
-    }
+    ddWindow.close();
+    document.querySelectorAll(".dd.open").forEach((d) => d.classList.remove("open"));
+    setTimeout(async () => {
+      await win.setSize(new LogicalSize(430, BAR_H));
+      if (savedY !== null) {
+        try {
+          const pos = await win.outerPosition();
+          await win.setPosition(new PhysicalPosition(pos.x, savedY));
+        } catch {}
+        savedY = null;
+      }
+    }, 300); // 等面板收起动画完成再缩窗
   }
 }
 
@@ -302,42 +432,38 @@ async function loadSettings() {
     curDir = r.recordDirectory || "";
     dirText.textContent = curDir || "(未设置)";
     dirText.title = curDir;
-  } catch (e) {
+  } catch {
     dirText.textContent = "读取失败";
   }
-  // 格式/码率仅支持 Simple 输出模式
+  // 格式/码率/编码器仅支持 Simple 输出模式
   let simple = true;
   try {
     const mode = await request("GetProfileParameter", { parameterCategory: "Output", parameterName: "Mode" });
     simple = mode.parameterValue !== "Advanced";
   } catch {}
-  selFormat.disabled = inVbitrate.disabled = inAbitrate.disabled = !simple;
+  ddFormat.setDisabled(!simple);
+  ddEncoder.setDisabled(!simple);
+  inVbitrate.disabled = inAbitrate.disabled = !simple;
   panelHint.textContent = simple
     ? "格式与码率在下次开始录制时生效"
-    : "当前 OBS 为高级输出模式：文件夹可直接更改，格式与码率请在 OBS 设置中修改";
+    : "当前 OBS 为高级输出模式：文件夹与窗口可直接用，格式与码率请在 OBS 设置中修改";
   panelHint.classList.toggle("err", !simple);
   if (!simple) return;
+  const FMT_LABELS = { mkv: "MKV（损坏可恢复，推荐）", mp4: "MP4（兼容性最好）", hybrid_mp4: "混合 MP4（MP4 + 可恢复）", fmp4: "碎片化 MP4", mov: "MOV" };
+  const ENC_LABELS = { nvenc: "NVIDIA NVENC（GPU 硬编，推荐）", x264: "软件 x264（CPU 编码）", qsv: "Intel 快速同步 (QSV)", amd: "AMD AMF" };
   try {
     const fmt = await request("GetProfileParameter", { parameterCategory: "SimpleOutput", parameterName: "RecFormat2" });
     const v = fmt.parameterValue || "mkv";
-    suppressFormatEvent = true;
-    if (![...selFormat.options].some((o) => o.value === v)) {
-      const opt = document.createElement("option");
-      opt.value = v; opt.textContent = v;
-      selFormat.appendChild(opt);
-    }
-    selFormat.value = v;
-    suppressFormatEvent = false;
+    ddFormat.setItems([{ value: v, label: FMT_LABELS[v] || v },
+      ...Object.entries(FMT_LABELS).filter(([k]) => k !== v).map(([value, label]) => ({ value, label }))]);
+    ddFormat.setValue(v, false);
   } catch {}
   try {
     const enc = await request("GetProfileParameter", { parameterCategory: "SimpleOutput", parameterName: "RecEncoder" });
     const v = enc.parameterValue || "nvenc";
-    if (![...selEncoder.options].some((o) => o.value === v)) {
-      const opt = document.createElement("option");
-      opt.value = v; opt.textContent = v;
-      selEncoder.appendChild(opt);
-    }
-    selEncoder.value = v;
+    ddEncoder.setItems([{ value: v, label: ENC_LABELS[v] || v },
+      ...Object.entries(ENC_LABELS).filter(([k]) => k !== v).map(([value, label]) => ({ value, label }))]);
+    ddEncoder.setValue(v, false);
   } catch {}
   try {
     const vb = await request("GetProfileParameter", { parameterCategory: "SimpleOutput", parameterName: "VBitrate" });
@@ -367,17 +493,6 @@ btnPickDir.addEventListener("click", async () => {
   }
 });
 
-selFormat.addEventListener("change", async () => {
-  if (suppressFormatEvent) return;
-  try {
-    await request("SetProfileParameter", { parameterCategory: "SimpleOutput", parameterName: "RecFormat2", parameterValue: selFormat.value });
-    flash("已保存");
-  } catch (e) {
-    flash(e?.message || "保存失败");
-    loadSettings();
-  }
-});
-
 async function saveBitrate(input, name) {
   const v = parseInt(input.value, 10);
   if (!Number.isFinite(v) || v <= 0) return flash("请输入有效码率");
@@ -391,16 +506,6 @@ async function saveBitrate(input, name) {
 
 inVbitrate.addEventListener("change", () => saveBitrate(inVbitrate, "VBitrate"));
 inAbitrate.addEventListener("change", () => saveBitrate(inAbitrate, "ABitrate"));
-
-selEncoder.addEventListener("change", async () => {
-  if (suppressSelEvents) return;
-  try {
-    await request("SetProfileParameter", { parameterCategory: "SimpleOutput", parameterName: "RecEncoder", parameterValue: selEncoder.value });
-    flash("已保存");
-  } catch (e) {
-    flash(e?.message || "保存失败");
-  }
-});
 
 // ---- 录制窗口切换 ----
 
@@ -423,18 +528,14 @@ async function loadSceneInfo() {
     }
     windowItemId = wcap.sceneItemId;
     // 回填下拉当前选择
-    suppressSelEvents = true;
-    if (mon?.sceneItemEnabled || !wcap.sceneItemEnabled) {
-      selWindow.value = "__display";
-    } else {
+    let cur = "__display";
+    if (!mon?.sceneItemEnabled && wcap.sceneItemEnabled) {
       const s = await request("GetInputSettings", { inputName: WINCAP_NAME });
-      const cur = s.inputSettings?.window || "";
-      const hit = [...selWindow.options].find((o) => o.value === cur);
-      selWindow.value = hit ? cur : "__display";
+      cur = s.inputSettings?.window || "__display";
     }
-    suppressSelEvents = false;
-  } catch (e) {
-    suppressSelEvents = false;
+    return cur;
+  } catch {
+    return "__display";
   }
 }
 
@@ -443,50 +544,26 @@ async function loadWindows() {
   loadingWindows = true;
   btnWinRefresh.textContent = "刷新中…";
   try {
-    await loadSceneInfo();
-    const keep = selWindow.value; // 保持当前选择
+    const cur = await loadSceneInfo();
     const entries = await invoke("list_windows");
-    [...selWindow.options].filter((o) => o.value !== "__display").forEach((o) => o.remove());
+    const items = [{ value: "__display", label: "整个显示器（当前画面）" }];
     for (const w of entries) {
-      const opt = document.createElement("option");
-      opt.value = w.obs_window;
-      opt.textContent = w.label;
-      opt.title = w.label;
-      selWindow.appendChild(opt);
+      items.push({
+        value: w.obs_window, label: w.label, hwnd: w.hwnd,
+        onHover: windowItemHover(w), onLeave: windowItemLeave(),
+      });
     }
-    suppressSelEvents = true;
-    selWindow.value = [...selWindow.options].some((o) => o.value === keep) ? keep : "__display";
-    suppressSelEvents = false;
+    ddWindow.setItems(items);
+    // 当前选中的窗口值不在列表里（如 OBS 里手动设的）也保底
+    suppressSave = true;
+    ddWindow.setValue(items.some((i) => i.value === cur) ? cur : "__display", false);
+    suppressSave = false;
   } catch {}
   btnWinRefresh.textContent = "刷新列表";
   loadingWindows = false;
 }
 
 btnWinRefresh.addEventListener("click", loadWindows);
-
-selWindow.addEventListener("change", async () => {
-  if (suppressSelEvents) return;
-  const v = selWindow.value;
-  try {
-    if (v === "__display") {
-      if (windowItemId !== null) {
-        await request("SetSceneItemEnabled", { sceneName, sceneItemId: windowItemId, sceneItemEnabled: false });
-      }
-      if (monitorItemId !== null) {
-        await request("SetSceneItemEnabled", { sceneName, sceneItemId: monitorItemId, sceneItemEnabled: true });
-      }
-    } else {
-      await request("SetInputSettings", { inputName: WINCAP_NAME, inputSettings: { window: v, method: "auto" } });
-      await request("SetSceneItemEnabled", { sceneName, sceneItemId: windowItemId, sceneItemEnabled: true });
-      if (monitorItemId !== null) {
-        await request("SetSceneItemEnabled", { sceneName, sceneItemId: monitorItemId, sceneItemEnabled: false });
-      }
-    }
-    flash("已切换");
-  } catch (e) {
-    flash(e?.message || "切换失败");
-  }
-});
 
 // ---- 实时统计（常驻信息条，启动即轮询） ----
 

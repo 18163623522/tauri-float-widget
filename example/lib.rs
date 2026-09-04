@@ -140,6 +140,7 @@ mod win_enum {
     pub struct WinEntry {
         pub label: String,      // 下拉显示："标题 — exe"
         pub obs_window: String, // OBS 格式："title:class:exe"（已转义）
+        pub hwnd: isize,        // 原生窗口句柄（供悬停高亮）
     }
 
     static COLLECTED: Mutex<Vec<WinEntry>> = Mutex::new(Vec::new());
@@ -199,6 +200,7 @@ mod win_enum {
                         COLLECTED.lock().unwrap().push(WinEntry {
                             label: format!("{} — {}", title, exe),
                             obs_window: format!("{}:{}:{}", obs_escape(&title), obs_escape(&class), exe),
+                            hwnd: hwnd.0 as isize,
                         });
                     }
                 }
@@ -223,6 +225,54 @@ mod win_enum {
 #[tauri::command]
 fn list_windows() -> Vec<win_enum::WinEntry> {
     win_enum::run()
+}
+
+// ---- 悬停高亮：在目标窗口四周画红框约 3 秒（画在屏幕 DC，任何窗口之上都可见） ----
+#[cfg(windows)]
+mod flash {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
+    use windows::Win32::Foundation::{COLORREF, HWND, RECT};
+    use windows::Win32::Graphics::Gdi::{
+        CreatePen, DeleteObject, GetDC, InvalidateRect, Rectangle, ReleaseDC, SelectObject,
+        PS_SOLID,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+
+    static GEN: AtomicU32 = AtomicU32::new(0);
+
+    pub fn flash_border(hwnd_val: isize) {
+        let gen = GEN.fetch_add(1, Ordering::SeqCst) + 1;
+        std::thread::spawn(move || unsafe {
+            let hwnd = HWND(hwnd_val as *mut _);
+            for _ in 0..10 {
+                if GEN.load(Ordering::SeqCst) != gen { return; } // 已切到别的窗口
+                let mut r = RECT::default();
+                if GetWindowRect(hwnd, &mut r).is_err() { return; }
+                let dc = GetDC(None);
+                // 4px 亮红框（COLORREF = 0x00BBGGRR）
+                let pen = CreatePen(PS_SOLID, 4, COLORREF(0x00_3C_46_FF));
+                let old = SelectObject(dc, windows::Win32::Graphics::Gdi::HGDIOBJ::from(pen));
+                let _ = Rectangle(dc, r.left, r.top, r.right, r.bottom);
+                SelectObject(dc, old);
+                let _ = DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ::from(pen));
+                ReleaseDC(None, dc);
+                std::thread::sleep(Duration::from_millis(300));
+            }
+            // 结束后擦掉边框（强制目标区域重绘）
+            let mut r = RECT::default();
+            if GetWindowRect(hwnd, &mut r).is_ok() {
+                let _ = InvalidateRect(None, Some(&r), true);
+            }
+        });
+    }
+}
+
+/// 悬停下拉项时高亮目标窗口（红框约 3 秒）
+#[cfg(windows)]
+#[tauri::command]
+fn flash_window(hwnd: isize) {
+    flash::flash_border(hwnd);
 }
 
 struct PosState {
@@ -260,7 +310,8 @@ pub fn run() {
             rec_file_size,
             latest_video,
             gpu_stats,
-            list_windows
+            list_windows,
+            flash_window
         ])
         .setup(|app| {
             if let Some(f) = pos_file(app.handle()) {

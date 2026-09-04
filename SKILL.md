@@ -42,6 +42,30 @@ description: 用 Tauri 做桌面常驻悬浮工具条（置顶毛玻璃控制条
 - 面板展开：窗口 setSize 瞬时完成（原生 resize 无法动画），内容用 **stagger 渐入**掩盖——每个 field 加 `.anim`，`opacity:0 + translateY(-6px)` → `field-in 0.22s ease-out forwards`，`animation-delay` 依次递增 25ms
 - toast 同款 field-in 入场
 
+### 自定义下拉（原生 select 与毛玻璃风格不搭，全部替换）
+- 结构：`.dd` 容器 = 触发按钮 `.dd-btn`（当前值 + 旋转 caret）+ 浮层 `.dd-list`
+- 浮层**向上弹出**（`bottom: calc(100% + 6px)`）——shell `overflow:hidden` 会裁掉向下弹的列表，向上弹永不超窗
+- 深底毛玻璃（rgba(32,32,36,.97) + blur(20px) + 圆角 10）、细滚动条、hover 行高亮、当前项 `✓` 蓝字
+- 关闭时机：点击外部（document click）+ Escape + 选中项
+- 入场动画 `dd-in 0.16s`（fade + 上移）
+
+### 窗口选择交互（"哪个窗口是哪个"的辨识问题）
+悬停下拉项 250ms 去抖后，用 GDI 在目标窗口四周画 4px 红框约 3 秒（画在屏幕 DC，任何窗口上方可见）：
+- `CreatePen(PS_SOLID, 4, COLORREF)` + `Rectangle(GetDC(None), windowRect)`，每 300ms 重画防被覆盖，结束 `InvalidateRect` 擦除
+- 连续 hover 多窗口用 `AtomicU32 generation` 原子令牌：新调用使旧高亮线程自行退出
+- windows 0.58 坑：`InvalidateRect` 在 `Win32_Graphics_Gdi` 不在 WindowsAndMessaging；`SelectObject` 要 `HGDIOBJ::from(pen)` 显式转换（`.into()` 报 E0283）
+
+### 面板展开动画（真展开，不是瞬现）
+窗口原生 resize 无法动画，用两层配合伪造：**先 setSize 再让面板 CSS 过渡**——
+```css
+#panel { max-height: 0; opacity: 0; padding: 0 16px; overflow: hidden; pointer-events: none;
+  transition: max-height .3s cubic-bezier(.2,.8,.25,1), opacity .22s, padding .3s; }
+#panel.show { max-height: 420px; opacity: 1; padding: 12px 16px; }
+```
+- 展开：`await setSize(...)` → `requestAnimationFrame(() => panel.classList.add("show"))`
+- 收起：`remove("show")` → `setTimeout(300)` 后再 setSize 缩回（等动画完）
+- 内容行 `.anim` 各自 `animation-delay` 递增（0.10s 起步 +40ms/行）
+
 ### 统计信息放主界面（不藏面板）
 常驻信息条每秒轮询：码率（文件增速 3 采样滑动窗口）/ FPS（丢帧≥1% 标 ⚠）/ CPU / GPU / 内存。启动即轮询，与面板开关无关。
 
