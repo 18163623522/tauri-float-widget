@@ -344,14 +344,13 @@ mod flash {
     use windows::core::w;
     use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
     use windows::Win32::Graphics::Gdi::{
-        CombineRgn, CreateRectRgn, CreateSolidBrush, HRGN, RGN_DIFF, SetWindowRgn,
+        CombineRgn, CreateRectRgn, CreateSolidBrush, RGN_DIFF, SetWindowRgn,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-        GetWindowRect, PostMessageW, PostQuitMessage, RegisterClassExW, SetTimer, WM_CLOSE,
-        WM_DESTROY, WM_TIMER, WNDCLASSEXW, WINDOW_EX_STYLE, WINDOW_STYLE, WS_EX_LAYERED,
-        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
-        WS_VISIBLE, MSG,
+        GetWindowRect, PostMessageW, PostQuitMessage, RegisterClassExW, SetTimer,
+        SetLayeredWindowAttributes, WM_CLOSE, WM_DESTROY, WM_TIMER, WNDCLASSEXW, LWA_ALPHA, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP, WS_VISIBLE, MSG,
     };
 
     static GEN: AtomicU32 = AtomicU32::new(0);
@@ -399,12 +398,18 @@ mod flash {
                 None, None, None, None,
             );
             let Ok(hwnd) = hwnd else { return };
+            // Win8+ 的 layered 窗口必须设置 alpha 才会渲染，否则完全不显示
+            if SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA).is_err() {
+                let _ = DestroyWindow(hwnd);
+                return;
+            }
             *OVERLAY.lock().unwrap() = Some(hwnd.0 as isize);
 
             // 窗口形状 = 外矩形挖掉内矩形，只剩 4px 边框
+            //（CombineRgn 的目标区域必须是已存在的 region，NULL 句柄会静默失败）
             let outer = CreateRectRgn(0, 0, w, h);
             let inner = CreateRectRgn(4, 4, w - 4, h - 4);
-            let mut frame = HRGN::default();
+            let mut frame = CreateRectRgn(0, 0, 0, 0);
             CombineRgn(frame, outer, inner, RGN_DIFF);
             let _ = SetWindowRgn(hwnd, frame, true);
 
