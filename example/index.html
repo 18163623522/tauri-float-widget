@@ -65,6 +65,20 @@
       .btn:disabled { opacity: 0.3; cursor: default; background: transparent; transform: none; }
       .btn svg { width: 16px; height: 16px; display: block; transition: transform 0.3s ease; }
       .btn:hover svg.gear-ic { transform: rotate(60deg); }
+      /* 图标切换按钮：双层图标交叉过渡（录制↔停止、暂停↔恢复） */
+      .btn-sw, .btn-rec { position: relative; }
+      .btn-sw .ic, .btn-rec .ic {
+        position: absolute; inset: 0;
+        display: flex; align-items: center; justify-content: center;
+        transition: opacity 0.16s ease, transform 0.24s cubic-bezier(0.34, 1.56, 0.64, 1);
+      }
+      .btn-sw .ic svg, .btn-rec .ic svg { width: 16px; height: 16px; }
+      .btn-sw .ic-b, .btn-rec .ic-b { opacity: 0; transform: scale(0.4) rotate(-45deg); }
+      .btn-sw.on .ic-a, .btn-rec.on .ic-a { opacity: 0; transform: scale(0.4) rotate(45deg); }
+      .btn-sw.on .ic-b, .btn-rec.on .ic-b { opacity: 1; transform: scale(1) rotate(0deg); }
+      .btn-rec.on {
+        box-shadow: 0 0 0 1px rgba(255, 69, 58, 0.45), 0 0 14px rgba(255, 69, 58, 0.28);
+      }
       /* ---- 信息条（常驻统计） ---- */
       #info-strip {
         height: 26px;
@@ -258,8 +272,14 @@
         <div id="dot" class="off" data-tauri-drag-region></div>
         <div id="label" data-tauri-drag-region>连接中…</div>
         <div class="spacer" data-tauri-drag-region></div>
-        <button id="btn-pause" class="btn" disabled title="暂停 / 恢复"></button>
-        <button id="btn-rec" class="btn" title="开始 / 停止录制"></button>
+        <button id="btn-pause" class="btn btn-sw" disabled title="暂停 / 恢复">
+          <span class="ic ic-a"><svg viewBox="0 0 16 16" fill="currentColor"><rect x="4" y="3" width="3" height="10" rx="1"/><rect x="9" y="3" width="3" height="10" rx="1"/></svg></span>
+          <span class="ic ic-b"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M5 3.2v9.6l8.2-4.8z"/></svg></span>
+        </button>
+        <button id="btn-rec" class="btn btn-rec" title="开始 / 停止录制">
+          <span class="ic ic-a"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="#ff453a"/></svg></span>
+          <span class="ic ic-b"><svg viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="2" fill="#fff"/></svg></span>
+        </button>
         <button id="btn-play" class="btn" title="播放最近一次录像"></button>
         <button id="btn-gear" class="btn" title="录制设置"></button>
         <button id="btn-close" class="btn" title="退出">

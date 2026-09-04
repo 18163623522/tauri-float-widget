@@ -238,9 +238,10 @@ function render() {
   else if (recState === "recording") { dot.classList.add("rec"); label.textContent = `REC · ${fmt(Date.now() - recStartMs)}`; }
   else if (recState === "paused") { dot.classList.add("paused"); label.textContent = `已暂停 · ${fmt(Date.now() - recStartMs)}`; }
 
-  btnRec.innerHTML = recState === "recording" || recState === "paused" ? ICON.stop : ICON.rec;
-  btnPause.innerHTML = recState === "paused" ? ICON.resume : ICON.pause;
-  btnPause.disabled = !(recState === "recording" || recState === "paused");
+  const busy = recState === "recording" || recState === "paused";
+  btnRec.classList.toggle("on", busy); // 圆点 ↔ 方块 图标动画切换
+  btnPause.classList.toggle("on", recState === "paused"); // 暂停 ↔ 恢复
+  btnPause.disabled = !busy;
 }
 
 setInterval(() => {
