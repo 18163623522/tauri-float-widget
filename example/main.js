@@ -28,7 +28,7 @@ const stMem = document.getElementById("st-mem");
 const stGpu = document.getElementById("st-gpu");
 
 const win = getCurrentWindow();
-const BAR_H = 86, PANEL_H = 478; // 逻辑像素：主界面(60条+26信息条) / 展开后整窗高度
+const BAR_H = 86, PANEL_H = 532; // 逻辑像素：主界面(60条+26信息条) / 展开后整窗高度
 const WINCAP_NAME = "悬浮条·窗口采集"; // 场景中自动创建/复用的 window_capture 源名
 
 const ICON = {
@@ -194,6 +194,16 @@ const ddEncoder = makeDropdown(document.getElementById("dd-encoder"), {
   onSelect: async (v) => {
     try {
       await request("SetProfileParameter", { parameterCategory: "SimpleOutput", parameterName: "RecEncoder", parameterValue: v });
+      flash("已保存");
+    } catch (e) { flash(e?.message || "保存失败"); }
+  },
+});
+
+const ddFps = makeDropdown(document.getElementById("dd-fps"), {
+  placeholder: "帧率",
+  onSelect: async (v) => {
+    try {
+      await request("SetProfileParameter", { parameterCategory: "Video", parameterName: "FPSCommon", parameterValue: v });
       flash("已保存");
     } catch (e) { flash(e?.message || "保存失败"); }
   },
@@ -472,6 +482,23 @@ async function loadSettings() {
   try {
     const ab = await request("GetProfileParameter", { parameterCategory: "SimpleOutput", parameterName: "ABitrate" });
     if (ab.parameterValue) inAbitrate.value = ab.parameterValue;
+  } catch {}
+  // 录制帧率（Video 段 FPSCommon；FPSType=0 才是常用值模式）
+  try {
+    const ftype = await request("GetProfileParameter", { parameterCategory: "Video", parameterName: "FPSType" });
+    if (ftype.parameterValue === "0") {
+      ddFps.setDisabled(false);
+      const fps = await request("GetProfileParameter", { parameterCategory: "Video", parameterName: "FPSCommon" });
+      const cur = fps.parameterValue || "60";
+      const PRESETS = ["10", "15", "20", "24", "25", "29.97", "30", "48", "50", "59.94", "60"];
+      const vals = PRESETS.includes(cur) ? PRESETS : [cur, ...PRESETS];
+      ddFps.setItems(vals.map((v) => ({ value: v, label: `${v} fps` })));
+      ddFps.setValue(cur, false);
+    } else {
+      ddFps.setDisabled(true);
+      ddFps.setItems([]);
+      ddFps.setValue(null, false);
+    }
   } catch {}
 }
 

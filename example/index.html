@@ -101,7 +101,7 @@
                     border-color 0.3s;
       }
       #panel.show {
-        max-height: 420px;
+        max-height: 475px;
         opacity: 1;
         padding: 12px 16px;
         pointer-events: auto;
@@ -118,6 +118,7 @@
       #panel.show .anim:nth-child(5) { animation-delay: 0.26s; }
       #panel.show .anim:nth-child(6) { animation-delay: 0.30s; }
       #panel.show .anim:nth-child(7) { animation-delay: 0.34s; }
+      #panel.show .anim:nth-child(8) { animation-delay: 0.38s; }
       @keyframes field-in { to { opacity: 1; transform: translateY(0); } }
       .panel-head {
         display: flex; align-items: center; justify-content: space-between;
@@ -321,6 +322,10 @@
               <span class="unit">kbps</span>
             </div>
           </div>
+        </div>
+        <div class="field anim">
+          <label>录制帧率</label>
+          <div id="dd-fps" class="dd"></div>
         </div>
         <div id="panel-hint" class="hint anim">格式与码率在下次开始录制时生效</div>
       </div>
