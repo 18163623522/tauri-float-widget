@@ -84,6 +84,13 @@ function makeDropdown(root, { placeholder = "请选择", onSelect }) {
   function renderList() {
     list.innerHTML = "";
     for (const it of items) {
+      if (it.group) {
+        const g = document.createElement("div");
+        g.className = "dd-group";
+        g.textContent = it.group;
+        list.appendChild(g);
+        continue;
+      }
       const el = document.createElement("div");
       el.className = "dd-item" + (it.value === value ? " cur" : "");
       el.textContent = it.label;
@@ -168,28 +175,27 @@ function windowItemLeave() {
 }
 
 const ddWindow = makeDropdown(document.getElementById("dd-window"), {
-  placeholder: "加载中…",
+  placeholder: "请选择",
   onSelect: async (v) => {
-    if (v === "__display") {
-      try {
+    if (v === "__none") return;
+    try {
+      if (v.startsWith("__mon:")) {
+        // 切到指定显示器：overlay 局部更新 monitor_id，不动其他设置
+        await request("SetInputSettings", { inputName: monitorName, inputSettings: { monitor_id: v.slice(6) }, overlay: true });
+        await request("SetSceneItemEnabled", { sceneName, sceneItemId: monitorItemId, sceneItemEnabled: true });
         if (windowItemId !== null) {
           await request("SetSceneItemEnabled", { sceneName, sceneItemId: windowItemId, sceneItemEnabled: false });
         }
-        if (monitorItemId !== null) {
-          await request("SetSceneItemEnabled", { sceneName, sceneItemId: monitorItemId, sceneItemEnabled: true });
-        }
-        flash("已切换为整屏");
-      } catch (e) { flash(e?.message || "切换失败"); }
-    } else {
-      try {
-        await request("SetInputSettings", { inputName: WINCAP_NAME, inputSettings: { window: v, method: "auto" } });
+        flash("已切换显示器");
+      } else {
+        await request("SetInputSettings", { inputName: WINCAP_NAME, inputSettings: { window: v }, overlay: true });
         await request("SetSceneItemEnabled", { sceneName, sceneItemId: windowItemId, sceneItemEnabled: true });
         if (monitorItemId !== null) {
           await request("SetSceneItemEnabled", { sceneName, sceneItemId: monitorItemId, sceneItemEnabled: false });
         }
         flash("已切换窗口");
-      } catch (e) { flash(e?.message || "切换失败"); }
-    }
+      }
+    } catch (e) { flash(e?.message || "切换失败"); }
   },
 });
 
@@ -551,14 +557,30 @@ inAbitrate.addEventListener("change", () => saveBitrate(inAbitrate, "ABitrate"))
 
 // ---- 录制窗口切换 ----
 
+let monitorName = ""; // 显示器采集源名
+
 async function loadSceneInfo() {
   try {
     const sl = await request("GetSceneList");
     sceneName = sl.currentProgramSceneName || "";
     const il = await request("GetSceneItemList", { sceneName });
     const items = il.sceneItems || [];
-    const mon = items.find((i) => i.inputKind === "monitor_capture");
-    monitorItemId = mon ? mon.sceneItemId : null;
+    let mon = items.find((i) => i.inputKind === "monitor_capture");
+    if (!mon) {
+      // 没有显示器采集源：创建一个隐藏的（用枚举的第一台显示器）
+      let firstId = "";
+      try {
+        const ds = await invoke("list_displays");
+        firstId = ds[0]?.monitor_id || "";
+      } catch {}
+      const created = await request("CreateInput", {
+        sceneName, inputName: "悬浮条·显示器采集", inputKind: "monitor_capture",
+        inputSettings: firstId ? { monitor_id: firstId } : {}, sceneItemEnabled: false,
+      });
+      mon = { sourceName: "悬浮条·显示器采集", sceneItemId: created.sceneItemId, sceneItemEnabled: false };
+    }
+    monitorName = mon.sourceName;
+    monitorItemId = mon.sceneItemId;
     let wcap = items.find((i) => i.inputKind === "window_capture");
     if (!wcap) {
       // 场景里还没有窗口采集源：创建一个隐藏的，切换时才显示
@@ -569,15 +591,16 @@ async function loadSceneInfo() {
       wcap = { sceneItemId: created.sceneItemId, sceneItemEnabled: false };
     }
     windowItemId = wcap.sceneItemId;
-    // 回填下拉当前选择
-    let cur = "__display";
-    if (!mon?.sceneItemEnabled && wcap.sceneItemEnabled) {
-      const s = await request("GetInputSettings", { inputName: WINCAP_NAME });
-      cur = s.inputSettings?.window || "__display";
+    // 回填下拉当前选择：显示器项用 monitor_id 匹配，窗口项用 window 串匹配
+    if (mon.sceneItemEnabled || !wcap.sceneItemEnabled) {
+      const s = await request("GetInputSettings", { inputName: monitorName });
+      const mid = s.inputSettings?.monitor_id || "";
+      return mid ? "__mon:" + mid : "__none";
     }
-    return cur;
+    const s = await request("GetInputSettings", { inputName: WINCAP_NAME });
+    return s.inputSettings?.window || "__none";
   } catch {
-    return "__display";
+    return "__none";
   }
 }
 
@@ -586,9 +609,16 @@ async function loadWindows() {
   loadingWindows = true;
   btnWinRefresh.textContent = "刷新中…";
   try {
-    const cur = await loadSceneInfo();
-    const entries = await invoke("list_windows");
-    const items = [{ value: "__display", label: "整个显示器（当前画面）" }];
+    const [cur, displays, entries] = await Promise.all([
+      loadSceneInfo(),
+      invoke("list_displays"),
+      invoke("list_windows"),
+    ]);
+    const items = [{ group: "显示器" }];
+    for (const d of displays) {
+      items.push({ value: "__mon:" + d.monitor_id, label: d.label, title: d.label });
+    }
+    items.push({ group: "应用窗口" });
     for (const w of entries) {
       items.push({
         value: w.obs_window, label: w.label, hwnd: w.hwnd,
@@ -596,9 +626,8 @@ async function loadWindows() {
       });
     }
     ddWindow.setItems(items);
-    // 当前选中的窗口值不在列表里（如 OBS 里手动设的）也保底
     suppressSave = true;
-    ddWindow.setValue(items.some((i) => i.value === cur) ? cur : "__display", false);
+    ddWindow.setValue(items.some((i) => i.value === cur) ? cur : "__none", false);
     suppressSave = false;
   } catch {}
   btnWinRefresh.textContent = "刷新列表";

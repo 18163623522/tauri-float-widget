@@ -227,6 +227,113 @@ fn list_windows() -> Vec<win_enum::WinEntry> {
     win_enum::run()
 }
 
+// ---- 显示器枚举（供 monitor_capture 选择） ----
+// OBS 30.2+ 的 monitor_capture 用 monitor_id（device interface path，
+// 形如 \\?\DISPLAY#DEL4362#...#{e6f07b5f-...}）。来源必须是 QueryDisplayConfig 的
+// monitorDevicePath（已实测与 OBS 逐字符一致）；EnumDisplayDevices 的 DeviceID
+// 是 MONITOR\... 形态，对不上。
+#[cfg(windows)]
+mod disp_enum {
+    use serde::Serialize;
+    use windows::core::PCWSTR;
+    use windows::Win32::Devices::Display::{
+        DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
+        DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+        DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME,
+        QDC_ONLY_ACTIVE_PATHS,
+    };
+    use windows::Win32::Graphics::Gdi::{EnumDisplaySettingsW, DEVMODEW, ENUM_CURRENT_SETTINGS};
+
+    #[derive(Serialize)]
+    pub struct DispEntry {
+        pub monitor_id: String, // OBS monitor_capture 的 monitor_id
+        pub label: String,      // "DELL U2725QE · 2560×1440"
+    }
+
+    fn to_string(buf: &[u16]) -> String {
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        String::from_utf16_lossy(&buf[..len])
+    }
+    fn to_cw(s: &str) -> Vec<u16> {
+        let mut v: Vec<u16> = s.encode_utf16().collect();
+        v.push(0);
+        v
+    }
+
+    pub fn run() -> Vec<DispEntry> {
+        let mut out = Vec::new();
+        unsafe {
+            let mut numpaths = 0u32;
+            let mut nummodes = 0u32;
+            if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut numpaths, &mut nummodes).0 != 0 {
+                return out;
+            }
+            let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); numpaths as usize];
+            let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); nummodes as usize];
+            if QueryDisplayConfig(
+                QDC_ONLY_ACTIVE_PATHS,
+                &mut numpaths,
+                paths.as_mut_ptr(),
+                &mut nummodes,
+                modes.as_mut_ptr(),
+                None, // QDC_ONLY_ACTIVE_PATHS 不能传 topology 输出（报 87）
+            ) .0 != 0
+            {
+                return out;
+            }
+            for p in paths.iter().take(numpaths as usize) {
+                let mut src = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+                    header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                        r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                        size: std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                        adapterId: p.sourceInfo.adapterId,
+                        id: p.sourceInfo.id,
+                    },
+                    ..Default::default()
+                };
+                if DisplayConfigGetDeviceInfo(&mut src.header) != 0 { continue; }
+                let mut tgt = DISPLAYCONFIG_TARGET_DEVICE_NAME {
+                    header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                        r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+                        size: std::mem::size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
+                        adapterId: p.targetInfo.adapterId,
+                        id: p.targetInfo.id,
+                    },
+                    ..Default::default()
+                };
+                if DisplayConfigGetDeviceInfo(&mut tgt.header) != 0 { continue; }
+
+                let monitor_id = to_string(&tgt.monitorDevicePath);
+                if monitor_id.is_empty() { continue; }
+                let friendly = to_string(&tgt.monitorFriendlyDeviceName);
+                let cw = to_cw(&to_string(&src.viewGdiDeviceName));
+                let mut dm = DEVMODEW {
+                    dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+                    ..Default::default()
+                };
+                let res = if EnumDisplaySettingsW(PCWSTR(cw.as_ptr()), ENUM_CURRENT_SETTINGS, &mut dm).as_bool() {
+                    format!("{}×{}", dm.dmPelsWidth, dm.dmPelsHeight)
+                } else {
+                    String::new()
+                };
+                out.push(DispEntry {
+                    monitor_id,
+                    label: if res.is_empty() { friendly } else { format!("{} · {}", friendly, res) },
+                });
+            }
+        }
+        out
+    }
+}
+
+/// 枚举本机显示器（monitor_id 与 OBS 对齐）
+#[cfg(windows)]
+#[tauri::command]
+fn list_displays() -> Vec<disp_enum::DispEntry> {
+    disp_enum::run()
+}
+
 // ---- 悬停高亮：置顶分层覆盖窗画 4px 红框约 3 秒 ----
 // 用 WS_EX_LAYERED|WS_EX_TRANSPARENT 的空心边框小窗盖在目标窗口上：
 // 不触发目标窗口重绘（零闪烁）、鼠标点击穿透、永远在最上层
@@ -358,6 +465,7 @@ pub fn run() {
             latest_video,
             gpu_stats,
             list_windows,
+            list_displays,
             flash_window
         ])
         .setup(|app| {
